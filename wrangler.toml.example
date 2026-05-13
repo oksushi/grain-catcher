@@ -1,0 +1,42 @@
+name = "grain-catcher"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+compatibility_flags = ["nodejs_compat"]
+account_id = "YOUR_CLOUDFLARE_ACCOUNT_ID"
+
+# Secrets (set via `wrangler secret put <NAME>`):
+#   GRAIN_USER_EMAIL       — your email as it appears on the Grain participant list
+#   GRAIN_USER_IDS         — comma-separated Grain user_id + person_id (used to match assignees)
+#   GRAIN_USER_NAME        — your name as it appears on action item assignees (fallback match)
+#   MAIL_FROM              — sender address on a Cloudflare Email Routing-enabled domain
+#                            (e.g. "Grain Catcher <grain@yourdomain.com>")
+#   MAIL_TO                — your OmniFocus Mail Drop address (same as destination_address below)
+#   WEBHOOK_SECRET         — shared secret; requests must include `?secret=...`
+#
+# The destination address (your OmniFocus Mail Drop) is set on the [[send_email]]
+# binding below as well — Cloudflare requires it in the binding declaration so it
+# can't be a runtime secret. Keep wrangler.toml out of git for this reason.
+
+# D1 database used to deduplicate already-sent tasks across webhook retries
+# and recording_updated re-deliveries. Strongly consistent — `INSERT OR IGNORE`
+# atomically claims a key, preventing the races that KV's eventual consistency
+# allows for near-simultaneous webhook deliveries.
+#
+# Create with `wrangler d1 create grain-catcher` and paste the printed
+# database_id below; then apply the schema with:
+#   wrangler d1 execute grain-catcher --remote --file migrations/0001_init.sql
+[[d1_databases]]
+binding = "DB"
+database_name = "grain-catcher"
+database_id = "YOUR_D1_DATABASE_ID"
+
+# Mailer binding. The destination must be a verified destination address in
+# Cloudflare Email Routing — to add Mail Drop, paste its address into Email
+# Routing → Destination Addresses, then click the verification link that
+# arrives as an OmniFocus task.
+[[send_email]]
+name = "MAILER"
+destination_address = "your-secret-address@sync.omnigroup.com"
+
+[observability]
+enabled = true

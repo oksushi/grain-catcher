@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+.dev.vars
+*.log
+.DS_Store
+dist/
+
+# Local Cloudflare config — contains account_id, database_id and (most importantly)
+# the OmniFocus Mail Drop address as destination_address. Use wrangler.toml.example
+# as a template.
+wrangler.toml

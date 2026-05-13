@@ -1,0 +1,6 @@
+GRAIN_USER_EMAIL="you@example.com"
+GRAIN_USER_IDS="<user_id>,<person_id>"   # comma-separated from Grain's myself endpoint
+GRAIN_USER_NAME="Your Name"
+MAIL_FROM="Grain Catcher <grain@yourdomain.com>"
+MAIL_TO="your-secret-address@sync.omnigroup.com"
+WEBHOOK_SECRET="local"

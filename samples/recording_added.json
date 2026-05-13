@@ -1,0 +1,50 @@
+{
+  "type": "recording_added",
+  "user_id": "owner-user-id",
+  "data": {
+    "id": "rec-abc123",
+    "title": "TWP / Acme — Discovery Workshop",
+    "url": "https://grain.com/share/recording/rec-abc123",
+    "start_datetime": "2026-05-12T03:00:00Z",
+    "end_datetime": "2026-05-12T04:00:00Z",
+    "duration_ms": 3600000,
+    "ai_summary": "Discussed migration scope, integrations, and timeline.",
+    "participants": [
+      {
+        "id": "p1",
+        "name": "Cal Wilson",
+        "email": "cal@theworkingparty.com.au",
+        "scope": "internal",
+        "confirmed_attendee": true
+      },
+      {
+        "id": "p2",
+        "name": "Jane Client",
+        "email": "jane@acme.com",
+        "scope": "external",
+        "confirmed_attendee": true
+      }
+    ],
+    "ai_action_items": [
+      {
+        "status": "pending",
+        "timestamp": 450000,
+        "text": "Send SOW draft to Jane by Friday",
+        "assignee": {
+          "id": "p1",
+          "name": "Cal Wilson",
+          "user_id": "cal-grain-user-id"
+        }
+      },
+      {
+        "status": "pending",
+        "timestamp": 1800000,
+        "text": "Confirm tax integration scope",
+        "assignee": {
+          "id": "p2",
+          "name": "Jane Client"
+        }
+      }
+    ]
+  }
+}
