@@ -4,8 +4,12 @@ A Cloudflare Worker that listens for [Grain](https://developers.grain.com/#hooks
 
 For every Grain-recorded meeting:
 
-- **If you attended** → one *"Review meeting notes: &lt;title&gt; //grain @15m"* task with the recording link and AI summary in the note.
-- **For every AI action item assigned to you** → one *"&lt;text&gt; //grain"* task with the timestamp and recording link.
+- **If you attended** → one *"&lt;Company&gt;: Review meeting notes: &lt;title&gt; //grain @15m"* task with the AI summary in the note.
+- **For every AI action item assigned to you** → one *"&lt;Company&gt;: &lt;text&gt; //grain"* task with the timestamp.
+
+Every task subject is prefixed with the **company** on the other side of the call — derived from external attendees' email domains (e.g. `sam@snooze.com.au` → `Snooze`), with The Working Party and your own people excluded. Internal-only meetings get no prefix.
+
+Each note is rendered as formatted HTML (OmniFocus Mail Drop renders the HTML part) showing the company, meeting, time, a **clickable recording link**, timestamp/summary, and the full **attendee list with names and emails**. A plain-text fallback is included for anywhere HTML isn't shown.
 
 The trailing `//grain` is parsed by OmniFocus as a tag; `@15m` becomes the estimated duration.
 
