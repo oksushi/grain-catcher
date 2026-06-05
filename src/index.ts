@@ -67,8 +67,14 @@ interface GrainWebhook {
 
 interface MailTask {
   subject: string;
-  body: string;
+  text: string; // plain-text note body (fallback)
+  html: string; // rich note body — what OmniFocus renders
   dedupeKey: string;
+}
+
+interface Attendee {
+  name: string;
+  email: string;
 }
 
 const RECORDING_EVENTS = new Set(["recording_added", "recording_updated"]);
@@ -168,37 +174,115 @@ function buildTasks(recording: GrainRecording, env: Env): MailTask[] {
   const when = formatWhen(recording.start_datetime);
   const recordingId = recording.id ?? "unknown";
 
-  if (userAttended(recording.participants, env)) {
-    const noteLines = [
-      when ? `Meeting: ${when}` : null,
-      link ? `Recording: ${link}` : null,
-      recording.ai_summary ? `\nSummary:\n${recording.ai_summary}` : null,
-    ].filter(Boolean) as string[];
+  // The external party on the call (everyone but us). Used both as the task
+  // subject prefix ("Snooze: …") and shown in the note body.
+  const company = companyName(recording.participants, env);
+  const attendees = listAttendees(recording.participants);
+  const prefix = company ? `${company}: ` : "";
 
+  if (userAttended(recording.participants, env)) {
+    const { text, html } = buildBody(
+      { title, link, when, company, attendees },
+      { summary: recording.ai_summary?.trim() },
+    );
     tasks.push({
-      subject: `Review meeting notes: ${title} //grain @15m`,
-      body: noteLines.join("\n"),
+      subject: `${prefix}Review meeting notes: ${title} //grain @15m`,
+      text,
+      html,
       dedupeKey: `review:${recordingId}`,
     });
   }
 
   for (const item of recording.ai_action_items ?? []) {
     if (!item.text || !assigneeIsUser(item.assignee, env)) continue;
-    const noteLines = [
-      `From meeting: ${title}`,
-      when ? `When: ${when}` : null,
-      link ? `Recording: ${link}` : null,
-      item.timestamp ? `Timestamp: ${formatTimestamp(item.timestamp)}` : null,
-    ].filter(Boolean) as string[];
-
+    const { text, html } = buildBody(
+      { title, link, when, company, attendees },
+      { timestamp: item.timestamp ? formatTimestamp(item.timestamp) : undefined },
+    );
     tasks.push({
-      subject: `${item.text.trim()} //grain`,
-      body: noteLines.join("\n"),
+      subject: `${prefix}${item.text.trim()} //grain`,
+      text,
+      html,
       dedupeKey: `action:${recordingId}:${fingerprint(item.text)}`,
     });
   }
 
   return tasks;
+}
+
+interface BodyContext {
+  title: string;
+  link: string;
+  when: string;
+  company: string | null;
+  attendees: Attendee[];
+}
+
+/**
+ * Renders the OmniFocus note in two flavours: a plain-text fallback and an
+ * HTML version. OmniFocus Mail Drop prefers the HTML part, so that's where the
+ * formatting and the clickable recording link live; the plain-text part keeps
+ * the note readable anywhere HTML isn't shown.
+ */
+function buildBody(
+  ctx: BodyContext,
+  extra: { timestamp?: string; summary?: string },
+): { text: string; html: string } {
+  // ---- plain text ----
+  const textLines: string[] = [];
+  if (ctx.company) textLines.push(`Company: ${ctx.company}`);
+  textLines.push(`Meeting: ${ctx.title}`);
+  if (ctx.when) textLines.push(`When: ${ctx.when}`);
+  if (ctx.link) textLines.push(`Recording: ${ctx.link}`);
+  if (extra.timestamp) textLines.push(`Timestamp: ${extra.timestamp}`);
+  if (ctx.attendees.length) {
+    textLines.push("", "Attendees:");
+    for (const a of ctx.attendees) {
+      textLines.push(`  • ${a.name && a.email ? `${a.name} <${a.email}>` : a.name || a.email}`);
+    }
+  }
+  if (extra.summary) {
+    textLines.push("", "Summary:", extra.summary);
+  }
+
+  // ---- html ----
+  const rows: string[] = [];
+  const row = (label: string, value: string) =>
+    `<p style="margin:0 0 6px"><strong>${label}:</strong> ${value}</p>`;
+  if (ctx.company) rows.push(row("Company", esc(ctx.company)));
+  rows.push(row("Meeting", esc(ctx.title)));
+  if (ctx.when) rows.push(row("When", esc(ctx.when)));
+  if (ctx.link) {
+    rows.push(row("Recording", `<a href="${escAttr(ctx.link)}">Watch in Grain &#8599;</a>`));
+  }
+  if (extra.timestamp) rows.push(row("Timestamp", esc(extra.timestamp)));
+  if (ctx.attendees.length) {
+    const items = ctx.attendees
+      .map((a) => {
+        const name = a.name ? `<strong>${esc(a.name)}</strong>` : "";
+        const email = a.email
+          ? `&lt;<a href="mailto:${escAttr(a.email)}">${esc(a.email)}</a>&gt;`
+          : "";
+        return `<li style="margin:0 0 2px">${[name, email].filter(Boolean).join(" ")}</li>`;
+      })
+      .join("");
+    rows.push(
+      `<p style="margin:12px 0 4px"><strong>Attendees</strong></p>` +
+        `<ul style="margin:0 0 6px;padding-left:20px">${items}</ul>`,
+    );
+  }
+  if (extra.summary) {
+    rows.push(
+      `<p style="margin:12px 0 4px"><strong>Summary</strong></p>` +
+        `<p style="margin:0">${esc(extra.summary).replace(/\n/g, "<br>")}</p>`,
+    );
+  }
+  const html =
+    `<div style="font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;font-size:14px;line-height:1.45;color:#1a1a1a">` +
+    rows.join("") +
+    `</div>`;
+
+  return { text: textLines.join("\n"), html };
 }
 
 function fingerprint(text: string): string {
@@ -211,6 +295,72 @@ function fingerprint(text: string): string {
     hash = (hash * 31 + normalised.charCodeAt(i)) >>> 0;
   }
   return hash.toString(36);
+}
+
+// Common second-level labels that sit in front of a country TLD
+// (e.g. com.au, co.uk, net.au) — used to find the real brand label.
+const SECOND_LEVEL_LABELS = new Set(["com", "net", "org", "co", "gov", "edu", "ac"]);
+
+function emailDomain(email: string | undefined): string {
+  if (!email) return "";
+  const at = email.lastIndexOf("@");
+  return at >= 0 ? email.slice(at + 1).trim().toLowerCase() : "";
+}
+
+/** The user's own org domain, derived from GRAIN_USER_EMAIL (e.g. theworkingparty.com.au). */
+function internalDomain(env: Env): string {
+  return emailDomain(env.GRAIN_USER_EMAIL);
+}
+
+/**
+ * The company on the other side of the call: every confirmed attendee who isn't
+ * us, collapsed to a prettified brand name from their email domain. Returns null
+ * for internal-only meetings. Multiple external orgs are joined with " / ".
+ */
+function companyName(participants: GrainParticipant[] | undefined, env: Env): string | null {
+  const ours = internalDomain(env);
+  const brands = new Set<string>();
+  for (const p of participants ?? []) {
+    if (p.confirmed_attendee === false) continue;
+    if (p.scope && p.scope.toLowerCase() === "internal") continue;
+    const domain = emailDomain(p.email);
+    if (!domain || domain === ours) continue;
+    const brand = prettifyDomain(domain);
+    if (brand) brands.add(brand);
+  }
+  return brands.size ? [...brands].join(" / ") : null;
+}
+
+/** snooze.com.au → "Snooze", mail.acme.co.uk → "Acme", country-road.com → "Country-Road". */
+function prettifyDomain(domain: string): string {
+  const labels = domain.replace(/^www\./, "").split(".").filter(Boolean);
+  if (!labels.length) return "";
+  let suffixCount = 1;
+  if (labels.length >= 3 && SECOND_LEVEL_LABELS.has(labels[labels.length - 2])) {
+    suffixCount = 2;
+  }
+  const brand = labels[Math.max(0, labels.length - 1 - suffixCount)];
+  return brand
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join("-");
+}
+
+/** All confirmed attendees with at least a name or an email, in payload order. */
+function listAttendees(participants: GrainParticipant[] | undefined): Attendee[] {
+  return (participants ?? [])
+    .filter((p) => p.confirmed_attendee !== false)
+    .map((p) => ({ name: (p.name ?? "").trim(), email: (p.email ?? "").trim() }))
+    .filter((a) => a.name || a.email);
+}
+
+function esc(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escAttr(value: string): string {
+  return esc(value).replace(/"/g, "&quot;");
 }
 
 function userIds(env: Env): Set<string> {
@@ -272,10 +422,18 @@ async function sendToMailDrop(task: MailTask, env: Env): Promise<void> {
   msg.setSender({ name: fromName, addr: fromAddr });
   msg.setRecipient(env.MAIL_TO);
   msg.setSubject(task.subject);
+  // multipart/alternative: OmniFocus Mail Drop renders the HTML part (formatting
+  // + clickable link); the plain-text part is the fallback.
   msg.addMessage({
     contentType: "text/plain",
-    data: task.body || task.subject,
+    data: task.text || task.subject,
   });
+  if (task.html) {
+    msg.addMessage({
+      contentType: "text/html",
+      data: task.html,
+    });
+  }
 
   try {
     await env.MAILER.send(new EmailMessage(fromAddr, env.MAIL_TO, msg.asRaw()));
