@@ -56,7 +56,7 @@ interface GrainRecording {
   duration_ms?: number;
   participants?: GrainParticipant[];
   ai_action_items?: GrainActionItem[];
-  ai_summary?: string;
+  ai_summary?: unknown; // Grain sends a string OR an object (e.g. { text: "…" })
 }
 
 interface GrainWebhook {
@@ -183,7 +183,7 @@ function buildTasks(recording: GrainRecording, env: Env): MailTask[] {
   if (userAttended(recording.participants, env)) {
     const { text, html } = buildBody(
       { title, link, when, company, attendees },
-      { summary: recording.ai_summary?.trim() },
+      { summary: summaryText(recording.ai_summary) },
     );
     tasks.push({
       subject: `${prefix}Review meeting notes: ${title} //grain @15m`,
@@ -353,6 +353,25 @@ function listAttendees(participants: GrainParticipant[] | undefined): Attendee[]
     .filter((p) => p.confirmed_attendee !== false)
     .map((p) => ({ name: (p.name ?? "").trim(), email: (p.email ?? "").trim() }))
     .filter((a) => a.name || a.email);
+}
+
+/**
+ * Grain's `ai_summary` is sometimes a plain string and sometimes an object
+ * (e.g. `{ text: "…" }`). Coerce to a trimmed string, or undefined when there's
+ * nothing usable — never "[object Object]", and never a throw on `.trim()`.
+ */
+function summaryText(summary: unknown): string | undefined {
+  if (typeof summary === "string") {
+    return summary.trim() || undefined;
+  }
+  if (summary && typeof summary === "object") {
+    const obj = summary as Record<string, unknown>;
+    for (const key of ["text", "summary", "markdown", "content"]) {
+      const value = obj[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+  }
+  return undefined;
 }
 
 function esc(value: string): string {
