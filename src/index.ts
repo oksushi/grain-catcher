@@ -56,7 +56,8 @@ interface GrainRecording {
   duration_ms?: number;
   participants?: GrainParticipant[];
   ai_action_items?: GrainActionItem[];
-  ai_summary?: string;
+  ai_summary?: unknown; // Grain sends a string OR an object (e.g. { text: "…" })
+  meeting_type?: { id?: string; name?: string; scope?: string } | null;
 }
 
 interface GrainWebhook {
@@ -180,13 +181,26 @@ function buildTasks(recording: GrainRecording, env: Env): MailTask[] {
   const attendees = listAttendees(recording.participants);
   const prefix = company ? `${company}: ` : "";
 
+  // Whether anyone outside our org was on the call — surfaced as a //internal or
+  // //external marker in the subject (OmniFocus reads it as a tag).
+  const scope = meetingScope(recording.participants, env);
+  const scopeTag = `//${scope}`;
+
+  const ctx: BodyContext = {
+    title,
+    link,
+    when,
+    company,
+    attendees,
+    duration: formatDuration(recording.duration_ms),
+    meetingType: recording.meeting_type?.name?.trim() || undefined,
+    scope,
+  };
+
   if (userAttended(recording.participants, env)) {
-    const { text, html } = buildBody(
-      { title, link, when, company, attendees },
-      { summary: recording.ai_summary?.trim() },
-    );
+    const { text, html } = buildBody(ctx, { summary: summaryText(recording.ai_summary) });
     tasks.push({
-      subject: `${prefix}Review meeting notes: ${title} //grain @15m`,
+      subject: `${prefix}Review meeting notes: ${title} //grain ${scopeTag} @15m`,
       text,
       html,
       dedupeKey: `review:${recordingId}`,
@@ -195,12 +209,12 @@ function buildTasks(recording: GrainRecording, env: Env): MailTask[] {
 
   for (const item of recording.ai_action_items ?? []) {
     if (!item.text || !assigneeIsUser(item.assignee, env)) continue;
-    const { text, html } = buildBody(
-      { title, link, when, company, attendees },
-      { timestamp: item.timestamp ? formatTimestamp(item.timestamp) : undefined },
-    );
+    if (item.status?.toLowerCase() === "completed") continue; // already done in Grain
+    const { text, html } = buildBody(ctx, {
+      timestamp: item.timestamp ? formatTimestamp(item.timestamp) : undefined,
+    });
     tasks.push({
-      subject: `${prefix}${item.text.trim()} //grain`,
+      subject: `${prefix}${item.text.trim()} //grain ${scopeTag}`,
       text,
       html,
       dedupeKey: `action:${recordingId}:${fingerprint(item.text)}`,
@@ -216,6 +230,9 @@ interface BodyContext {
   when: string;
   company: string | null;
   attendees: Attendee[];
+  duration?: string;
+  meetingType?: string;
+  scope: "internal" | "external";
 }
 
 /**
@@ -228,11 +245,16 @@ function buildBody(
   ctx: BodyContext,
   extra: { timestamp?: string; summary?: string },
 ): { text: string; html: string } {
+  const scopeLabel = ctx.scope === "external" ? "External" : "Internal";
+  const typeLine = ctx.meetingType ? `${ctx.meetingType} (${scopeLabel})` : scopeLabel;
+
   // ---- plain text ----
   const textLines: string[] = [];
   if (ctx.company) textLines.push(`Company: ${ctx.company}`);
   textLines.push(`Meeting: ${ctx.title}`);
+  textLines.push(`Type: ${typeLine}`);
   if (ctx.when) textLines.push(`When: ${ctx.when}`);
+  if (ctx.duration) textLines.push(`Duration: ${ctx.duration}`);
   if (ctx.link) textLines.push(`Recording: ${ctx.link}`);
   if (extra.timestamp) textLines.push(`Timestamp: ${extra.timestamp}`);
   if (ctx.attendees.length) {
@@ -251,7 +273,9 @@ function buildBody(
     `<p style="margin:0 0 6px"><strong>${label}:</strong> ${value}</p>`;
   if (ctx.company) rows.push(row("Company", esc(ctx.company)));
   rows.push(row("Meeting", esc(ctx.title)));
+  rows.push(row("Type", esc(typeLine)));
   if (ctx.when) rows.push(row("When", esc(ctx.when)));
+  if (ctx.duration) rows.push(row("Duration", esc(ctx.duration)));
   if (ctx.link) {
     rows.push(row("Recording", `<a href="${escAttr(ctx.link)}">Watch in Grain &#8599;</a>`));
   }
@@ -274,7 +298,7 @@ function buildBody(
   if (extra.summary) {
     rows.push(
       `<p style="margin:12px 0 4px"><strong>Summary</strong></p>` +
-        `<p style="margin:0">${esc(extra.summary).replace(/\n/g, "<br>")}</p>`,
+        `<div style="margin:0">${markdownToHtml(extra.summary)}</div>`,
     );
   }
   const html =
@@ -353,6 +377,101 @@ function listAttendees(participants: GrainParticipant[] | undefined): Attendee[]
     .filter((p) => p.confirmed_attendee !== false)
     .map((p) => ({ name: (p.name ?? "").trim(), email: (p.email ?? "").trim() }))
     .filter((a) => a.name || a.email);
+}
+
+/**
+ * Grain's `ai_summary` is sometimes a plain string and sometimes an object
+ * (e.g. `{ text: "…" }`). Coerce to a trimmed string, or undefined when there's
+ * nothing usable — never "[object Object]", and never a throw on `.trim()`.
+ */
+function summaryText(summary: unknown): string | undefined {
+  if (typeof summary === "string") {
+    return summary.trim() || undefined;
+  }
+  if (summary && typeof summary === "object") {
+    const obj = summary as Record<string, unknown>;
+    for (const key of ["text", "summary", "markdown", "content"]) {
+      const value = obj[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+  }
+  return undefined;
+}
+
+/** Was anyone outside our org on the call? Prefers Grain's scope, falls back to email domain. */
+function meetingScope(
+  participants: GrainParticipant[] | undefined,
+  env: Env,
+): "internal" | "external" {
+  const ours = internalDomain(env);
+  const hasExternal = (participants ?? []).some((p) => {
+    if (p.confirmed_attendee === false) return false;
+    if (p.scope) {
+      const s = p.scope.toLowerCase();
+      if (s === "external") return true;
+      if (s === "internal") return false;
+      // "unknown" (e.g. notetaker bots) → fall through to the domain check
+    }
+    const domain = emailDomain(p.email);
+    return Boolean(domain) && domain !== ours;
+  });
+  return hasExternal ? "external" : "internal";
+}
+
+/** 3600000 → "1h", 3120000 → "52m", 4500000 → "1h 15m". Undefined when absent. */
+function formatDuration(ms: number | undefined): string | undefined {
+  if (!ms || ms <= 0) return undefined;
+  const totalMin = Math.round(ms / 60000);
+  if (totalMin < 60) return `${totalMin}m`;
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  return mins ? `${hours}h ${mins}m` : `${hours}h`;
+}
+
+/**
+ * Minimal Markdown → HTML for the AI summary (Grain sends it as markdown).
+ * Handles headings, unordered lists, bold/italic/code and paragraphs — enough
+ * to render cleanly in an OmniFocus note without pulling in a parser.
+ */
+function markdownToHtml(md: string): string {
+  const out: string[] = [];
+  let listOpen = false;
+  const closeList = () => {
+    if (listOpen) {
+      out.push("</ul>");
+      listOpen = false;
+    }
+  };
+  for (const raw of md.replace(/\r\n/g, "\n").split("\n")) {
+    const line = raw.trimEnd();
+    const bullet = line.match(/^\s*[-*]\s+(.*)$/);
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (bullet) {
+      if (!listOpen) {
+        out.push(`<ul style="margin:4px 0;padding-left:20px">`);
+        listOpen = true;
+      }
+      out.push(`<li style="margin:0 0 2px">${renderInline(bullet[1])}</li>`);
+    } else if (heading) {
+      closeList();
+      out.push(`<p style="margin:8px 0 2px"><strong>${renderInline(heading[2])}</strong></p>`);
+    } else if (line.trim() === "") {
+      closeList();
+    } else {
+      closeList();
+      out.push(`<p style="margin:0 0 6px">${renderInline(line)}</p>`);
+    }
+  }
+  closeList();
+  return out.join("");
+}
+
+/** Inline markdown (bold/italic/code) on an already-trusted line; escapes HTML first. */
+function renderInline(text: string): string {
+  return esc(text)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\s][^*]*?)\*(?!\*)/g, "$1<em>$2</em>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
 }
 
 function esc(value: string): string {
